@@ -1,0 +1,163 @@
+import logging
+from aiogram import Bot, Dispatcher, types, executor
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+
+API_TOKEN = 'YOUR_BOT_TOKEN_HERE'
+
+logging.basicConfig(level=logging.INFO)
+
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher(bot, storage=MemoryStorage())
+
+categories = []
+products = []
+cart = {}
+
+class OrderState(StatesGroup):
+    waiting_for_payment_method = State()
+
+ADMIN_IDS = [7007277566]  # Replaced with actual Telegram user ID for @Ztech7
+
+@dp.message_handler(commands=['start'])
+async def send_welcome(message: types.Message):
+    keyboard = InlineKeyboardMarkup()
+    for cat in categories:
+        keyboard.add(InlineKeyboardButton(f"📦 {cat}", callback_data=f"cat_{cat}"))
+    keyboard.add(
+        InlineKeyboardButton("🮺 My Cart", callback_data="cart"),
+        InlineKeyboardButton("📦 My Order", callback_data="order"),
+    )
+    keyboard.add(
+        InlineKeyboardButton("☎️ Contact", callback_data="contact"),
+        InlineKeyboardButton("📘 Help", callback_data="help")
+    )
+    await message.answer("👋 Welcome to Yene Gebeya! Choose a category:", reply_markup=keyboard)
+
+@dp.callback_query_handler(lambda c: c.data.startswith('cat_'))
+async def show_products(callback_query: types.CallbackQuery):
+    category = callback_query.data[4:]
+    filtered = [p for p in products if p['category'].lower() == category.lower()]
+    for product in filtered:
+        kb = InlineKeyboardMarkup()
+        kb.add(
+            InlineKeyboardButton("💼 Add to Cart", callback_data=f"add_{product['id']}")
+        )
+        await bot.send_photo(
+            callback_query.from_user.id,
+            product['image'],
+            caption=f"{product['name']} - {product['price']} ETB\n{product['description']}",
+            reply_markup=kb
+        )
+    await bot.answer_callback_query(callback_query.id)
+
+@dp.callback_query_handler(lambda c: c.data.startswith('add_'))
+async def add_to_cart(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    product_id = int(callback_query.data.split('_')[1])
+    cart.setdefault(user_id, []).append(product_id)
+    await bot.answer_callback_query(callback_query.id, text="✅ Added to cart!")
+
+@dp.callback_query_handler(lambda c: c.data == 'cart')
+async def show_cart(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    items = cart.get(user_id, [])
+    if not items:
+        await bot.send_message(user_id, "🧵 Your cart is empty.")
+        return
+    total = 0
+    msg = "🮺 Your Cart:\n"
+    for item_id in items:
+        product = next((p for p in products if p['id'] == item_id), None)
+        if product:
+            msg += f"- {product['name']} ({product['price']} ETB)\n"
+            total += product['price']
+    msg += f"\n💵 Total: {total} ETB"
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(InlineKeyboardButton("Buy Now", callback_data="checkout"))
+    await bot.send_message(user_id, msg, reply_markup=keyboard)
+    await bot.answer_callback_query(callback_query.id)
+
+@dp.callback_query_handler(lambda c: c.data == 'checkout')
+async def checkout(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(
+        InlineKeyboardButton("Telebirr", callback_data="pay_telebirr"),
+        InlineKeyboardButton("M-Pesa", callback_data="pay_mpesa"),
+        InlineKeyboardButton("CBE", callback_data="pay_cbe"),
+        InlineKeyboardButton("Dashen", callback_data="pay_dashen"),
+        InlineKeyboardButton("Coop Bank", callback_data="pay_coop")
+    )
+    await bot.send_message(user_id, "💳 Choose your payment method:", reply_markup=keyboard)
+    await OrderState.waiting_for_payment_method.set()
+
+@dp.callback_query_handler(lambda c: c.data.startswith("pay_"), state=OrderState.waiting_for_payment_method)
+async def handle_payment(callback_query: types.CallbackQuery, state: FSMContext):
+    method = callback_query.data.split("_")[1]
+    user_id = callback_query.from_user.id
+    info = {
+        "telebirr": "Telebirr: 0915794686 / 091283132",
+        "mpesa": "M-Pesa: 0777991328",
+        "cbe": "CBE: 1000463082085 Hana Tasew",
+        "dashen": "Dashen Bank: (Send to admin)",
+        "coop": "Coop Bank: 1000082245867 Hana Tasew"
+    }
+    await bot.send_message(user_id, f"✅ Selected: {method.upper()}\n{info.get(method)}\n\nAfter payment, use /myorder to track your delivery.")
+    cart[user_id] = []
+    await state.finish()
+    await bot.answer_callback_query(callback_query.id)
+
+@dp.message_handler(commands=['myorder'])
+async def track_order(message: types.Message):
+    await message.reply("📦 Your order is being processed. We'll contact you shortly!")
+
+@dp.callback_query_handler(lambda c: c.data == 'contact')
+async def show_contact(callback_query: types.CallbackQuery):
+    await bot.send_message(callback_query.from_user.id, "☎️ Contact us at: @Ztech7 or 0915794686")
+    await bot.answer_callback_query(callback_query.id)
+
+@dp.callback_query_handler(lambda c: c.data == 'help')
+async def show_help(callback_query: types.CallbackQuery):
+    msg = "ℹ️ How to shop:\n1. Choose a category\n2. View products\n3. Add to cart\n4. Buy now and pay\n5. Track with /myorder"
+    await bot.send_message(callback_query.from_user.id, msg)
+    await bot.answer_callback_query(callback_query.id)
+
+@dp.message_handler(commands=['add_category'])
+async def add_category(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return await message.reply("⛔ Not authorized.")
+    category = message.text[len("/add_category "):].strip()
+    if category in categories:
+        return await message.reply("⚠️ Category already exists.")
+    categories.append(category)
+    await message.reply(f"✅ Category '{category}' added.")
+
+@dp.message_handler(commands=['add_product'])
+async def add_product(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return await message.reply("⛔ Not authorized.")
+    try:
+        parts = message.text[len("/add_product "):].split('|')
+        name, price, description, image, category = [p.strip() for p in parts]
+        new_id = max([p['id'] for p in products], default=0) + 1
+        products.append({
+            "id": new_id,
+            "name": name,
+            "price": int(price),
+            "description": description,
+            "image": image,
+            "category": category
+        })
+        await message.reply(f"✅ Product '{name}' added under '{category}'.")
+    except Exception:
+        await message.reply("❌ Format:\n/add_product Name | Price | Desc | Image | Category")
+
+@dp.message_handler(commands=['myid'])
+async def show_my_id(message: types.Message):
+    await message.reply(f"Your Telegram ID is: {message.from_user.id}")
+
+if __name__ == '__main__':
+    executor.start_polling(dp, skip_updates=True)
